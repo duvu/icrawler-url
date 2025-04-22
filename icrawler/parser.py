@@ -22,7 +22,7 @@ class Parser(ThreadPool):
         lock: A threading.Lock object.
     """
 
-    def __init__(self, thread_num, signal, session, in_queue=None, out_queue=None, name="parser"):
+    def __init__(self, thread_num=1, signal=None, session=None, in_queue=None, out_queue=None, name="parser"):
         """Init Parser with some shared variables."""
         super().__init__(thread_num, in_queue=in_queue, out_queue=out_queue, name=name)
         self.signal = signal

@@ -36,3 +36,4 @@ icrawler/utils/test_proxy.py
 
 # version
 icrawler/version.py
+venv/

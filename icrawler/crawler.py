@@ -3,14 +3,11 @@
 import logging
 import sys
 import time
-from importlib import import_module
 
 from . import defaults
-from . import storage as storage_package
-from .downloader import Downloader
+from .downloader import Downloader, URLCollector
 from .feeder import Feeder
 from .parser import Parser
-from .storage import BaseStorage
 from .utils import ProxyPool, Session, Signal
 
 
@@ -35,7 +32,7 @@ class Crawler:
         feeder_threads=1,
         parser_threads=1,
         downloader_threads=1,
-        storage={"backend": "FileSystem", "root_dir": "images"},
+        storage=None,
         log_level=logging.INFO,
         extra_feeder_args=None,
         extra_parser_args=None,
@@ -50,7 +47,8 @@ class Crawler:
             feeder_threads: thread number used by feeder
             parser_threads: thread number used by parser
             downloader_threads: thread number used by downloader
-            storage (dict or BaseStorage): storage backend configuration
+            storage: Deprecated, kept for backward compatibility only
+                    (set to None when using URLCollector)
             log_level: logging level for the logger
         """
 
@@ -58,7 +56,10 @@ class Crawler:
         self.set_proxy_pool()
         self.set_session()
         self.init_signal()
-        self.set_storage(storage)
+        
+        # Use None as storage - real storage functionality has been removed
+        self.storage = None
+            
         # set feeder, parser and downloader
         feeder_kwargs = {} if extra_feeder_args is None else extra_feeder_args
         parser_kwargs = {} if extra_parser_args is None else extra_parser_args
@@ -82,39 +83,11 @@ class Crawler:
     def init_signal(self):
         """Init signal
 
-        4 signals are added: ``feeder_exited``, ``parser_exited``,
-        ``reach_max_num`` and ``exceed_storage_space``.
+        3 signals are added: ``feeder_exited``, ``parser_exited``,
+        and ``reach_max_num``.
         """
         self.signal = Signal()
-        self.signal.set(feeder_exited=False, parser_exited=False, reach_max_num=False, exceed_storage_space=False)
-
-    def set_storage(self, storage):
-        """Set storage backend for downloader
-
-        For full list of storage backend supported, please see :mod:`storage`.
-
-        Args:
-            storage (dict or BaseStorage): storage backend configuration or instance
-
-        """
-        if isinstance(storage, BaseStorage):
-            self.storage = storage
-        elif isinstance(storage, dict):
-            if "backend" not in storage and "root_dir" in storage:
-                storage["backend"] = "FileSystem"
-            try:
-                backend_cls = getattr(storage_package, storage["backend"])
-            except AttributeError:
-                try:
-                    backend_cls = import_module(storage["backend"])
-                except ImportError:
-                    self.logger.error("cannot find backend module %s", storage["backend"])
-                    sys.exit()
-            kwargs = storage.copy()
-            del kwargs["backend"]
-            self.storage = backend_cls(**kwargs)
-        else:
-            raise TypeError('"storage" must be a storage object or dict')
+        self.signal.set(feeder_exited=False, parser_exited=False, reach_max_num=False)
 
     def set_proxy_pool(self, pool=None):
         """Construct a proxy pool
