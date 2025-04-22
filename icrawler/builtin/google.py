@@ -1,11 +1,11 @@
 import datetime
-import json
 import re
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 
-from .. import Crawler, Feeder, ImageDownloader, Parser
+from .. import Crawler, Feeder, Parser
+from ..downloader import URLCollector
 from .filter import Filter
 
 
@@ -170,7 +170,7 @@ class GoogleParser(Parser):
 
 class GoogleImageCrawler(Crawler):
     def __init__(
-        self, feeder_cls=GoogleFeeder, parser_cls=GoogleParser, downloader_cls=ImageDownloader, *args, **kwargs
+        self, feeder_cls=GoogleFeeder, parser_cls=GoogleParser, downloader_cls=URLCollector, *args, **kwargs
     ):
         super().__init__(feeder_cls, parser_cls, downloader_cls, *args, **kwargs)
 

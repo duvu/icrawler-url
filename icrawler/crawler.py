@@ -32,7 +32,7 @@ class Crawler:
         feeder_threads=1,
         parser_threads=1,
         downloader_threads=1,
-        storage=None,
+        storage=None,  # Kept for backward compatibility, not used
         log_level=logging.INFO,
         extra_feeder_args=None,
         extra_parser_args=None,
@@ -43,12 +43,11 @@ class Crawler:
         Args:
             feeder_cls: class of feeder
             parser_cls: class of parser
-            downloader_cls: class of downloader.
+            downloader_cls: class of downloader
             feeder_threads: thread number used by feeder
             parser_threads: thread number used by parser
             downloader_threads: thread number used by downloader
-            storage: Deprecated, kept for backward compatibility only
-                    (set to None when using URLCollector)
+            storage: Deprecated parameter, kept for backward compatibility
             log_level: logging level for the logger
         """
 
@@ -56,18 +55,16 @@ class Crawler:
         self.set_proxy_pool()
         self.set_session()
         self.init_signal()
-        
-        # Use None as storage - real storage functionality has been removed
-        self.storage = None
             
         # set feeder, parser and downloader
         feeder_kwargs = {} if extra_feeder_args is None else extra_feeder_args
         parser_kwargs = {} if extra_parser_args is None else extra_parser_args
         downloader_kwargs = {} if extra_downloader_args is None else extra_downloader_args
+        
         self.feeder = feeder_cls(feeder_threads, self.signal, self.session, **feeder_kwargs)
         self.parser = parser_cls(parser_threads, self.signal, self.session, **parser_kwargs)
         self.downloader = downloader_cls(
-            downloader_threads, self.signal, self.session, self.storage, **downloader_kwargs
+            downloader_threads, self.signal, self.session, None, **downloader_kwargs
         )
         # connect all components
         self.feeder.connect(self.parser).connect(self.downloader)

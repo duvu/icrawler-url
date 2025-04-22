@@ -1,8 +1,9 @@
-import errno
 import queue
 import time
 import json
-import os
+import re
+import mimetypes
+from io import BytesIO
 from threading import current_thread
 from urllib.parse import urlparse
 
@@ -15,25 +16,22 @@ class Downloader(ThreadPool):
     """Base class for downloader.
 
     A thread pool of downloader threads, in charge of downloading files and
-    saving them in the corresponding paths.
+    managing image URLs.
 
     Attributes:
-        task_queue (CachedQueue): A queue storing image downloading tasks,
-            connecting :class:`Parser` and :class:`Downloader`.
+        task_queue (CachedQueue): A queue storing image tasks from the parser.
         signal (Signal): A Signal object shared by all components.
         session (Session): A session object.
         logger: A logging.Logger object used for logging.
-        workers (list): A list of downloader threads.
         thread_num (int): The number of downloader threads.
         lock (Lock): A threading.Lock object.
     """
 
     def __init__(self, thread_num=1, signal=None, session=None, storage=None):
-        """Init Parser with some shared variables."""
+        """Initialize with thread pool settings."""
         super().__init__(thread_num, out_queue=None, name="downloader")
         self.signal = signal
         self.session = session
-        self.storage = storage
         self.file_idx_offset = 0
         self.clear_status()
 
@@ -42,61 +40,39 @@ class Downloader(ThreadPool):
         self.fetched_num = 0
 
     def set_file_idx_offset(self, file_idx_offset=0):
-        """Set offset of file index.
-
-        Args:
-            file_idx_offset: It can be either an integer or 'auto'. If set
-                to an integer, the filename will start from
-                ``file_idx_offset`` + 1.
-        """
+        """Set offset of file index."""
         if isinstance(file_idx_offset, int):
             self.file_idx_offset = file_idx_offset
         else:
             raise ValueError('"file_idx_offset" must be an integer')
 
     def get_filename(self, task, default_ext):
-        """Set the path where the image will be saved.
-
-        The default strategy is to use an increasing 6-digit number as
-        the filename. You can override this method if you want to set custom
-        naming rules. The file extension is kept if it can be obtained from
-        the url, otherwise ``default_ext`` is used as extension.
-
-        Args:
-            task (dict): The task dict got from ``task_queue``.
-
-        Output:
-            Filename with extension.
-        """
+        """Generate a filename based on the URL."""
         url_path = urlparse(task["file_url"])[2]
         extension = url_path.split(".")[-1] if "." in url_path else default_ext
         file_idx = self.fetched_num + self.file_idx_offset
         return f"{file_idx:06d}.{extension}"
 
     def reach_max_num(self):
-        """Check if downloaded images reached max num.
-
-        Returns:
-            bool: if downloaded images reached max num.
-        """
+        """Check if reached max num."""
         if self.signal.get("reach_max_num"):
             return True
         if self.max_num > 0 and self.fetched_num >= self.max_num:
             return True
-        else:
-            return False
+        return False
 
     def keep_file(self, task, response, **kwargs):
+        """Determine if a file should be kept. Override in subclasses."""
         return True
 
-    def download(self, task, default_ext, timeout=5, max_retry=3, overwrite=False, **kwargs):
-        """Download the image.
-
+    def download(self, task, default_ext, timeout=5, max_retry=3, **kwargs):
+        """Process a URL task.
+        
         Args:
-            task (dict): The task dict got from ``task_queue``.
-            timeout (int): Timeout of making requests for downloading images.
-            max_retry (int): the max retry times if the request fails.
-            **kwargs: reserved arguments for overriding.
+            task (dict): The task dict with the file_url.
+            timeout (int): Timeout for requests.
+            max_retry (int): Max retry attempts.
+            **kwargs: Additional arguments for subclasses.
         """
         file_url = task["file_url"]
         task["success"] = False
@@ -108,10 +84,8 @@ class Downloader(ThreadPool):
                 response = self.session.get(file_url, timeout=timeout)
             except Exception as e:
                 self.logger.error(
-                    "Exception caught when downloading file %s, " "error: %s, remaining retry times: %d",
-                    file_url,
-                    e,
-                    retry - 1,
+                    "Exception caught when downloading file %s, error: %s, remaining retry times: %d",
+                    file_url, e, retry - 1
                 )
             else:
                 if self.reach_max_num():
@@ -122,31 +96,21 @@ class Downloader(ThreadPool):
                     break
                 elif not self.keep_file(task, response, **kwargs):
                     break
+                
                 with self.lock:
                     self.fetched_num += 1
                     filename = self.get_filename(task, default_ext)
                 self.logger.info("image #%s\t%s %s", self.fetched_num, filename, file_url)
 
-                # Mark task as success but don't save anything since we have no storage
+                # Mark task as processed
                 task["success"] = True
                 task["filename"] = filename
                 break
             finally:
                 retry -= 1
 
-    def process_meta(self, task):
-        """Process some meta data of the images.
-
-        This method should be overridden by users if wanting to do more things
-        other than just downloading the image, such as saving annotations.
-
-        Args:
-            task (dict): The task dict got from task_queue. This method will
-                make use of fields other than ``file_url`` in the dict.
-        """
-        pass
-
     def start(self, file_idx_offset=0, *args, **kwargs):
+        """Start the downloader threads."""
         self.clear_status()
         self.set_file_idx_offset(file_idx_offset)
         self.init_workers(*args, **kwargs)
@@ -155,22 +119,7 @@ class Downloader(ThreadPool):
             self.logger.debug("thread %s started", worker.name)
 
     def worker_exec(self, max_num, default_ext="", queue_timeout=5, req_timeout=5, max_idle_time=None, **kwargs):
-        """Target method of workers.
-
-        Get task from ``task_queue`` and then download files and process meta
-        data. A downloader thread will exit in either of the following cases:
-
-        1. All parser threads have exited and the task_queue is empty.
-        2. Downloaded image number has reached required number(max_num).
-        3. No new downloads for max_idle_time seconds.
-
-        Args:
-            max_num (int): Maximum number of images to download
-            queue_timeout (int): Timeout of getting tasks from ``task_queue``.
-            req_timeout (int): Timeout of making requests for downloading pages.
-            max_idle_time (int): Maximum time (in seconds) to wait without receiving new images
-            **kwargs: Arguments passed to the :func:`download` method.
-        """
+        """Worker thread execution function."""
         self.max_num = max_num
         last_download_time = time.time()
 
@@ -199,7 +148,6 @@ class Downloader(ThreadPool):
                 self.logger.error("exception in thread %s", current_thread().name)
             else:
                 self.download(task, default_ext, req_timeout, **kwargs)
-                self.process_meta(task)
                 self.in_queue.task_done()
 
         self.logger.info("thread %s exit", current_thread().name)
@@ -208,114 +156,56 @@ class Downloader(ThreadPool):
         self.logger.info("all downloader threads exited")
 
 
-class ImageDownloader(Downloader):
-    """Downloader specified for images."""
-
-    def _size_lt(self, sz1, sz2):
-        return max(sz1) <= max(sz2) and min(sz1) <= min(sz2)
-
-    def _size_gt(self, sz1, sz2):
-        return max(sz1) >= max(sz2) and min(sz1) >= min(sz2)
-
-    def keep_file(self, task, response, min_size=None, max_size=None):
-        """Decide whether to keep the image
-
-        Compare image size with ``min_size`` and ``max_size`` to decide.
-
-        Args:
-            response (Response): response of requests.
-            min_size (tuple or None): minimum size of required images.
-            max_size (tuple or None): maximum size of required images.
-        Returns:
-            bool: whether to keep the image.
-        """
-        try:
-            from io import BytesIO
-            img = Image.open(BytesIO(response.content))
-        except OSError:
-            return False
-        task["img_size"] = img.size
-        if min_size and not self._size_gt(img.size, min_size):
-            return False
-        if max_size and not self._size_lt(img.size, max_size):
-            return False
-        return True
-
-    def get_filename(self, task, default_ext):
-        url_path = urlparse(task["file_url"])[2]
-        if "." in url_path:
-            extension = url_path.split(".")[-1]
-            if extension.lower() not in ["jpg", "jpeg", "png", "bmp", "tiff", "gif", "ppm", "pgm"]:
-                extension = default_ext
-        else:
-            extension = default_ext
-        file_idx = self.fetched_num + self.file_idx_offset
-        return f"{file_idx:06d}.{extension}"
-
-    def worker_exec(self, max_num, default_ext="jpg", queue_timeout=5, req_timeout=5, max_idle_time=None, **kwargs):
-        super().worker_exec(max_num, default_ext, queue_timeout, req_timeout, max_idle_time, **kwargs)
-
-
-from io import BytesIO
-import mimetypes
-import re
-
 class URLCollector(Downloader):
-    """Special downloader that only collects URLs without downloading files.
+    """Specialized downloader that collects valid image URLs.
     
-    Instead of downloading images, this class just collects valid image URLs and saves
-    them to a JSON file. It checks if each URL points to a valid, downloadable image
-    before adding it to the collection.
+    Instead of downloading images, this class validates URLs and saves
+    them to a JSON file.
     """
     
     def __init__(self, thread_num=1, signal=None, session=None, storage=None, output_file='image_urls.json'):
-        """Initialize URLCollector.
+        """Initialize URL collector.
         
         Args:
-            thread_num: Number of threads to use
-            signal: Signal object for inter-thread communication
-            session: Session object for making requests
-            storage: Storage object (not used in this class, can be None)
-            output_file: Path to the JSON file where URLs will be saved
+            thread_num: Number of threads
+            signal: Signal object for communication
+            session: Session object for requests
+            storage: Not used
+            output_file: Path to save the collected URLs
         """
-        # Pass an empty dict as storage if None is provided
-        # This avoids errors in the parent class initialization
-        storage = storage or {}
-        super().__init__(thread_num, signal, session, storage)
+        super().__init__(thread_num, signal, session)
         self.output_file = output_file
         self.urls = []
         
     def is_valid_image_url(self, url, timeout=5):
-        """Check if the URL is a valid, downloadable image.
+        """Check if URL points to a valid, accessible image.
         
         Args:
             url: URL to check
             timeout: Request timeout in seconds
             
         Returns:
-            bool: True if the URL is a valid image, False otherwise
+            bool: True if valid image URL
         """
-        # Simple URL format check
+        # Basic URL format check
         if not re.match(r'^https?://', url):
             self.logger.info(f"Invalid URL format: {url}")
             return False
             
-        # Skip Google 'about-this-image' URLs
+        # Skip non-image URLs
         if 'google.com/search/about-this-image' in url:
             self.logger.info(f"Skipping Google about-this-image URL: {url}")
             return False
             
-        # Skip wiki file pages (not direct image links)
         if 'wikimedia.org/wiki/' in url or 'wikipedia.org/wiki/' in url:
             self.logger.info(f"Skipping wiki file page: {url}")
             return False
         
-        # Try to get the content type from the URL extension
+        # Check extension for quick validation
         ext = url.split('.')[-1].lower() if '.' in url.split('/')[-1] else None
         if ext and ext in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp']:
             content_type = mimetypes.guess_type(url)[0]
             if content_type and content_type.startswith('image/'):
-                # Still do a HEAD request to verify URL is accessible
                 try:
                     response = self.session.head(url, timeout=timeout)
                     if response.status_code == 200:
@@ -324,7 +214,7 @@ class URLCollector(Downloader):
                     self.logger.error(f"Error checking URL {url}: {e}")
                     return False
         
-        # If extension doesn't provide enough info, do a GET request and check content
+        # Full content validation if needed
         try:
             response = self.session.get(url, timeout=timeout)
             if response.status_code != 200:
@@ -336,7 +226,7 @@ class URLCollector(Downloader):
                 self.logger.info(f"URL is not an image (content-type: {content_type}): {url}")
                 return False
                 
-            # Try to open the content as an image
+            # Try to open as image
             try:
                 Image.open(BytesIO(response.content))
                 return True
@@ -348,20 +238,19 @@ class URLCollector(Downloader):
             self.logger.error(f"Error downloading URL {url}: {e}")
             return False
         
-    def download(self, task, default_ext, timeout=5, max_retry=3, overwrite=False, **kwargs):
-        """Instead of downloading, check if URL is valid and collect it.
+    def download(self, task, default_ext, timeout=5, max_retry=3, **kwargs):
+        """Validate and collect image URL.
         
         Args:
-            task: Task dictionary containing file_url
+            task: Task with file_url
             default_ext: Not used
-            timeout: Request timeout in seconds
-            max_retry: Number of retries if validation fails
-            overwrite: Not used
-            **kwargs: Additional arguments
+            timeout: Request timeout
+            max_retry: Retry attempts for validation
+            **kwargs: Not used
         """
         file_url = task["file_url"]
         
-        # Verify that the URL is a valid image
+        # Validate URL
         retry = max_retry
         is_valid = False
         
@@ -372,27 +261,25 @@ class URLCollector(Downloader):
         if not is_valid:
             self.logger.info(f"Skipping invalid image URL: {file_url}")
             task["success"] = False
-            task["filename"] = None
             return
         
+        # Collect valid URL
         with self.lock:
             self.fetched_num += 1
             self.urls.append(file_url)
             self.logger.info("Valid image URL #%s\t%s", self.fetched_num, file_url)
             
-            # Save to JSON file periodically
+            # Save periodically
             if self.fetched_num % 10 == 0:
                 self._save_urls()
                 
             if self.reach_max_num():
                 self.signal.set(reach_max_num=True)
         
-        # Mark task as success
         task["success"] = True
-        task["filename"] = None
     
     def _save_urls(self):
-        """Save collected URLs to a JSON file."""
+        """Save URLs to JSON file."""
         try:
             with open(self.output_file, 'w') as f:
                 json.dump(self.urls, f, indent=2)

@@ -58,11 +58,8 @@ class Parser(ThreadPool):
         while True:
             if self.signal.get("reach_max_num"):
                 self.logger.info(
-                    "downloaded image reached max num, thread %s " "is ready to exit", current_thread().name
+                    "downloaded image reached max num, thread %s is ready to exit", current_thread().name
                 )
-                break
-            if self.signal.get("exceed_storage_space"):
-                self.logger.info("no more storage space, thread %s " "is ready to exit", current_thread().name)
                 break
             # get the page url
             try:
@@ -100,7 +97,7 @@ class Parser(ThreadPool):
                             f.write(response.content)
 
                     for task in task_list:
-                        while not self.signal.get("reach_max_num") and not self.signal.get("exceed_storage_space"):
+                        while not self.signal.get("reach_max_num"):
                             try:
                                 if isinstance(task, dict):
                                     self.output(task, timeout=1)
@@ -118,8 +115,6 @@ class Parser(ThreadPool):
                             else:
                                 break
                         if self.signal.get("reach_max_num"):
-                            break
-                        if self.signal.get("exceed_storage_space"):
                             break
                     self.in_queue.task_done()
                     break
